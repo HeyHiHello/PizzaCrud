@@ -1,0 +1,324 @@
+package org.example.pizzacrud.database.repository;
+
+import org.example.pizzacrud.database.datasource.DataSource;
+import org.example.pizzacrud.database.entity.Ingredient;
+import org.example.pizzacrud.database.entity.Pizza;
+import org.example.pizzacrud.database.repository.exception.InternalDatabaseException;
+import org.example.pizzacrud.database.repository.exception.NoChangesMadeException;
+import org.example.pizzacrud.database.repository.exception.NoObjectException;
+import org.example.pizzacrud.database.repository.exception.WrongKeyException;
+
+import java.sql.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+
+
+/**
+ * PizzaRepository provides access to database Pizza entities
+ */
+public class PizzaRepository implements Repository<Pizza, Integer> {
+    private final IngredientRepository ingredientRepository = RepositoryBuilder.buildIngredientRepository();
+
+    /**
+     * Select all Pizza entities
+     *
+     * @return List of all Pizzas
+     * @throws InternalDatabaseException Internal database error
+     */
+    @Override
+    public List<Pizza> findAll() throws InternalDatabaseException {
+        final String PIZZA_SQL = "SELECT id, name, price FROM Pizzas";
+        List<Pizza> pizzas = new ArrayList<>();
+
+        try (Connection conn = DataSource.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(PIZZA_SQL)) {
+
+            ResultSet resultSet = stmt.executeQuery();
+
+            while (resultSet.next()) {
+                Pizza pizza = buildPizzaFromResultSet(resultSet);
+                getAndSetPizzasIngredients(pizza);
+                pizzas.add(pizza);
+            }
+        } catch (SQLException e) {
+            throw new InternalDatabaseException(e);
+        }
+        return pizzas;
+    }
+
+    /**
+     * Select Pizza by id
+     *
+     * @param id id of a Pizza that must be found
+     * @return Optional object that contains found pizza
+     * or empty if none was found by given id
+     * @throws InternalDatabaseException Internal database error
+     */
+    @Override
+    public Optional<Pizza> findById(Integer id) throws InternalDatabaseException {
+        if (id <= 0) {
+            throw new WrongKeyException();
+        }
+        final String PIZZA_SQL = "SELECT id, name, price FROM Pizzas WHERE id = ?";
+        try (Connection conn = DataSource.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(PIZZA_SQL)) {
+            stmt.setInt(1, id);
+            ResultSet resultSet = stmt.executeQuery();
+
+            if (resultSet.next()) {
+                Pizza pizza = buildPizzaFromResultSet(resultSet);
+                getAndSetPizzasIngredients(pizza);
+                return Optional.of(pizza);
+            }
+
+        } catch (SQLException e) {
+            throw new InternalDatabaseException(e);
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Insert new or update existing Pizza.
+     * If Pizza.id if valid (greater than zero) method will update Pizza by this id.
+     * Else new record wil be inserted into database
+     *
+     * @param pizza object to be saved to database
+     * @return same object that was provided in parameter.
+     * In case of Insert operation new id is set
+     * @throws InternalDatabaseException Internal database error
+     * @throws NoChangesMadeException    database returned no rows was affected
+     */
+    @Override
+    public Pizza save(Pizza pizza) throws SQLException {
+        if (pizza == null) {
+            throw new NoObjectException();
+        }
+        if (pizza.getId() <= 0) {
+            return create(pizza);
+        } else {
+            return update(pizza);
+        }
+    }
+
+    /**
+     * Updates Pizza by pizza.id
+     *
+     * @param pizza object to be updated
+     * @return same ingredient as in parameters
+     * @throws NoChangesMadeException    database returned no rows was affected
+     * @throws InternalDatabaseException Internal database error
+     */
+    @Override
+    public Pizza update(Pizza pizza) throws NoChangesMadeException, InternalDatabaseException {
+        final String SQL = "UPDATE Pizzas SET name = ?, price = ? WHERE id = ?";
+        try (Connection conn = DataSource.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(SQL)) {
+            stmt.setString(1, pizza.getName());
+            stmt.setDouble(2, pizza.getPrice());
+            stmt.setInt(3, pizza.getId());
+            int affectedRows = stmt.executeUpdate();
+            ingredientRepository.saveAll(pizza.getIngredients());
+            ifNoAffectedRowsThrow(affectedRows);
+        } catch (NoChangesMadeException e) {
+            throw e;
+        } catch (SQLException e) {
+            throw new InternalDatabaseException(e);
+        }
+        return pizza;
+    }
+
+    /**
+     * Insert new Pizza into database.
+     * Its initial id is ignored and will be replaced by id generated by database.
+     *
+     * @param pizza pizza to be inserted
+     * @return same ingredient as in parameters with id set from database
+     * @throws InternalDatabaseException Internal database error
+     * @throws NoChangesMadeException    Database returned no rows was affected
+     */
+    @Override
+    public Pizza create(Pizza pizza) throws SQLException {
+        final String SQL = "INSERT INTO Pizzas (name, price) VALUES (?, ?)";
+        Connection conn = DataSource.getConnection();
+        try (PreparedStatement stmt = conn.prepareStatement(SQL, Statement.RETURN_GENERATED_KEYS)) {
+            conn.setAutoCommit(false);
+            stmt.setString(1, pizza.getName());
+            stmt.setDouble(2, pizza.getPrice());
+            int affectedRows = stmt.executeUpdate();
+
+            ifNoAffectedRowsThrow(affectedRows);
+            ingredientRepository.saveAll(pizza.getIngredients());
+            setGeneratedKeysFromStatement(pizza, stmt);
+            conn.commit();
+            conn.close();
+        } catch (NoChangesMadeException e) {
+            conn.rollback();
+            conn.close();
+            throw e;
+        } catch (SQLException e) {
+            conn.rollback();
+            conn.close();
+            throw new InternalDatabaseException(e);
+        }
+        return pizza;
+    }
+
+    /**
+     * Delete Pizza by its id
+     *
+     * @param id id of an Pizza to be deleted
+     * @throws InternalDatabaseException Internal database error
+     * @throws NoChangesMadeException    Database returned no rows was affected
+     */
+    @Override
+    public void delete(Integer id) throws InternalDatabaseException, NoChangesMadeException {
+        if (id <= 0) {
+            throw new WrongKeyException();
+        }
+        final String SQL = "DELETE FROM Pizzas WHERE id = ?";
+        try (Connection conn = DataSource.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(SQL)) {
+            stmt.setInt(1, id);
+            int affectedRows = stmt.executeUpdate();
+            ifNoAffectedRowsThrow(affectedRows);
+        } catch (NoChangesMadeException e) {
+            throw e;
+        } catch (SQLException e) {
+            throw new InternalDatabaseException(e);
+        }
+    }
+
+    /**
+     * Test if Ingredient by id exists in database
+     *
+     * @param id id of an Ingredient to be tested
+     * @return true if found, false otherwise
+     * @throws InternalDatabaseException Internal database error
+     */
+    @Override
+    public boolean exists(Integer id) throws InternalDatabaseException {
+        if (id <= 0) {
+            throw new WrongKeyException();
+        }
+        Optional<Pizza> pizzaOpt = findById(id);
+        return pizzaOpt.isPresent();
+    }
+
+    public void savePizzasIngredients(Pizza pizza) throws SQLException {
+        Connection conn = DataSource.getConnection();
+
+        try {
+            conn.setAutoCommit(false);
+            deletePrevIngredients(pizza, conn);
+            insertNewIngredients(pizza, conn);
+            conn.commit();
+            conn.close();
+        } catch (SQLException e) {
+            conn.rollback();
+            conn.close();
+            throw new NoChangesMadeException(e);
+        }
+    }
+
+    public List<Pizza> getPizzasByOrderId(int orderId) throws InternalDatabaseException {
+        String sql = "SELECT Pizzas.id as id, name, price FROM Pizzas LEFT JOIN m2m_Pizza_Order ON Pizzas.id = m2m_Pizza_Order.pizza_id WHERE order_id = ?";
+
+        List<Pizza> pizzas = new ArrayList<>();
+
+        try (Connection conn = DataSource.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setInt(1, orderId);
+
+            ResultSet resultSet = stmt.executeQuery();
+
+            while (resultSet.next()) {
+                Pizza pizza = buildPizzaFromResultSet(resultSet);
+                pizzas.add(pizza);
+            }
+            return pizzas;
+        } catch (SQLException e) {
+            throw new InternalDatabaseException(e);
+        }
+    }
+
+    /**
+     * Build Pizza from ResultSet row
+     * ResultSet must be prepared by calling ResultSet::next()
+     * so its current row is the ingredient to be build
+     *
+     * @param resultSet ResultSet prepared by calling ResultSet::next()
+     * @return Build Pizza object
+     * @throws SQLException Internal database error
+     */
+    private Pizza buildPizzaFromResultSet(ResultSet resultSet) throws SQLException {
+        Pizza pizza = new Pizza();
+        pizza.setId(resultSet.getInt("id"));
+        pizza.setName(resultSet.getString("name"));
+        pizza.setPrice(resultSet.getFloat("price"));
+        return pizza;
+    }
+
+    /**
+     * Get form repository and set pizza ingredient
+     *
+     * @param pizza Pizza to be changed
+     * @throws SQLException Internal database error
+     */
+    private void getAndSetPizzasIngredients(Pizza pizza) throws SQLException {
+        List<Ingredient> ingredients = ingredientRepository.findByPizzaId(pizza.getId());
+        pizza.setIngredients(ingredients);
+    }
+
+    /**
+     * Obtains generated keys ResultSet of a PreparedStatement
+     * and fill id of a Pizza with data from that ResultSet
+     *
+     * @param pizza Pizza for id set
+     * @param stmt  Executed PreparedStatement that contains generated key
+     * @throws SQLException Internal database error
+     */
+    private void setGeneratedKeysFromStatement(Pizza pizza, PreparedStatement stmt) throws SQLException {
+        ResultSet resultSet = stmt.getGeneratedKeys();
+        resultSet.next();
+        int id = resultSet.getInt(1);
+        pizza.setId(id);
+    }
+
+    /**
+     * Tests if any row was affected by and throws NoChangeMadeException if not
+     *
+     * @param affectedRows amount of affected rows
+     * @throws NoChangesMadeException Database returned no rows was affected
+     */
+    private void ifNoAffectedRowsThrow(int affectedRows) throws NoChangesMadeException {
+        if (affectedRows == 0) {
+            throw new NoChangesMadeException("New Ingredient is not created");
+        }
+    }
+
+    private void deletePrevIngredients(Pizza pizza, Connection conn) throws SQLException {
+        final String DELETE_SQL = "DELETE FROM m2m_Pizzas_Ingredients WHERE pizza_id = ?";
+        try (PreparedStatement stmt = conn.prepareStatement(DELETE_SQL)) {
+            stmt.setInt(1, pizza.getId());
+            int affectedRows = stmt.executeUpdate();
+            if (affectedRows == 0) {
+                throw new NoChangesMadeException();
+            }
+        }
+    }
+
+    private void insertNewIngredients(Pizza pizza, Connection conn) throws SQLException {
+        final String INSERT_SQL = "INSERT INTO m2m_Pizzas_Ingredients (pizza_id, ingredient_id) VALUES (?, ?)";
+        try (PreparedStatement stmt = conn.prepareStatement(INSERT_SQL)) {
+
+            for (Ingredient ingredient : pizza.getIngredients()) {
+                stmt.setInt(1, pizza.getId());
+                stmt.setInt(2, ingredient.getId());
+                stmt.addBatch();
+            }
+
+            stmt.executeBatch();
+        }
+    }
+}
